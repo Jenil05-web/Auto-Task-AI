@@ -1,0 +1,47 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+    <title>Connect Gmail</title>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 600px;
+            margin: 50px auto;
+            padding: 20px;
+            text-align: center;
+        }
+
+        .connect-btn {
+            display: inline-block;
+            background-color: #4285f4;
+            color: white;
+            padding: 15px 30px;
+            text-decoration: none;
+            border-radius: 5px;
+            font-size: 16px;
+            margin-top: 20px;
+        }
+
+        .connect-btn:hover {
+            background-color: #357ae8;
+        }
+    </style>
+</head>
+
+<body>
+    <h1>Connect Your Gmail Account</h1>
+    <p>Click the button below to authorize this application to access your Gmail account.</p>
+
+    <a href="<%= authUrl %>" class="connect-btn">
+        Connect Gmail Account
+    </a>
+
+    <p style="margin-top: 30px; font-size: 12px; color: #666;">
+        This will redirect you to Google's authorization page.
+    </p>
+</body>
+
+</html>
