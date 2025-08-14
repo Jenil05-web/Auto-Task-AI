@@ -21,20 +21,21 @@ function generateSecurePassword() {
 }
 
 // Existing imports
-import taskRoutes from "./routes/taskRoutes.js";
-import authRoutes from "./routes/authRoutes.js";
-import workflowRoutes from "./routes/workflowRoutes.js";
-import paymentRoutes from "./routes/paymentRoutes.js";
-import User from "./models/User.js";
-import EmailAutomation from "./models/EmailAutomation.js";
-import suggestionsRoutes from "./routes/suggestions.js";
-import mlRoutes from "./routes/mlRoutes.js";
+import taskRoutes from "../routes/taskRoutes.js";
+import authRoutes from "../routes/authRoutes.js";
+import workflowRoutes from "../routes/workflowRoutes.js";
+import paymentRoutes from "../routes/paymentRoutes.js";
+import User from "../models/User.js";
+import EmailAutomation from "../models/EmailAutomation.js";
+import suggestionsRoutes from "../routes/suggestions.js";
+import mlRoutes from "../routes/mlRoutes.js";
+import emailService from "./services/emailService.js";
 
 // NEW IMPORTS FOR AUTOMATED CALLING
-import callTaskRoutes from "./routes/callTasks.js";
-import clientRoutes from "./routes/clients.js";
-import webhookRoutes from "./routes/webhooks.js";
-import analyticsRoutes from "./routes/analytics.js";
+import callTaskRoutes from "../routes/callTasks.js";
+import clientRoutes from "../routes/clients.js";
+import webhookRoutes from "../routes/webhooks.js";
+import analyticsRoutes from "../routes/analytics.js";
 
 
 console.log("OPENAI_API_KEY:", process.env.OPENAI_API_KEY);
@@ -293,6 +294,18 @@ mongoose
   .then(async () => {
     console.log("✅ Connected to MongoDB");
 
+    // Initialize Email Service
+    try {
+      const emailStatus = await emailService.verifyEmailService();
+      if (emailStatus.success) {
+        console.log("✅ Email service verified and ready");
+      } else {
+        console.log("⚠️  Email service not configured:", emailStatus.error);
+      }
+    } catch (err) {
+      console.log("⚠️  Email service initialization skipped:", err.message);
+    }
+
     // Import scheduler AFTER connection is established
     try {
       await import("./scheduler.js");
@@ -303,7 +316,7 @@ mongoose
 
     // NEW: Initialize Call Scheduler
     try {
-      await import("./services/schedulerService.js");
+      await import("../services/schedulerService.js");
       console.log("✅ Call scheduler initialized");
     } catch (err) {
       console.error("❌ Call scheduler error:", err);
