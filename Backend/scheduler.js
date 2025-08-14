@@ -2,10 +2,42 @@ import axios from "axios";
 import cron from "node-cron";
 import Task from "../models/task.js";
 import Handlebars from "handlebars";
+import { sendEmail } from "./services/emailService.js";
 
 // ✅ FIXED: Default webhook URL constant
 const DEFAULT_WEBHOOK_URL =
   "https://jenil005.app.n8n.cloud/webhook/execute-task";
+
+// ✅ NEW: Email sending strategy configuration
+const EMAIL_STRATEGY = process.env.EMAIL_STRATEGY || "webhook_with_fallback"; // Options: "webhook_only", "direct_only", "webhook_with_fallback", "both"
+
+// ✅ NEW: Direct email sending function as fallback
+async function sendEmailDirectly(task, compiledTemplate, variables) {
+  try {
+    if (!task.emailConfig || !task.emailConfig.from || !task.emailConfig.to) {
+      throw new Error("Invalid email configuration");
+    }
+
+    console.log("📧 Sending email directly using email service...");
+    
+    const emailResult = await sendEmail({
+      to: Array.isArray(task.emailConfig.to) ? task.emailConfig.to.join(", ") : task.emailConfig.to,
+      subject: task.emailConfig.subject || `Task Notification: ${task.description}`,
+      text: compiledTemplate,
+      html: task.emailConfig.htmlMessage || compiledTemplate
+    });
+
+    if (emailResult.success) {
+      console.log("✅ Email sent successfully via direct service");
+      return { success: true, messageId: emailResult.messageId };
+    } else {
+      throw new Error(emailResult.error);
+    }
+  } catch (error) {
+    console.error("❌ Failed to send email directly:", error.message);
+    return { success: false, error: error.message };
+  }
+}
 
 // ✅ NEW: Helper to compile template with variables
 function compileTemplate(template, variables) {
@@ -409,6 +441,100 @@ async function triggerTaskWebhook(task, payload) {
       JSON.stringify(n8nPayload, null, 2)
     );
 
+    // ✅ NEW: Handle different email strategies
+    console.log(`📧 Email strategy: ${EMAIL_STRATEGY}`);
+    
+    let webhookResult = null;
+    let directEmailResult = null;
+
+    // Strategy: Direct email only
+    if (EMAIL_STRATEGY === "direct_only") {
+      console.log("📧 Using direct email sending only...");
+      directEmailResult = await sendEmailDirectly(task, compiledTemplate, variables);
+      
+      if (directEmailResult.success) {
+        await Task.findByIdAndUpdate(task._id, {
+          $push: {
+            executionHistory: {
+              executedAt: new Date(),
+              status: "success",
+              webhookUrl: "direct_email",
+              manualTrigger: payload.manualTrigger || false,
+              logs: [`✅ Email sent successfully via direct service (ID: ${directEmailResult.messageId})`],
+              triggeredRules: triggeredRules,
+              emailMessageId: directEmailResult.messageId,
+            },
+          },
+        });
+
+        return { 
+          status: "success", 
+          message: "Task executed successfully via direct email",
+          emailMessageId: directEmailResult.messageId
+        };
+      } else {
+        throw new Error(`Direct email failed: ${directEmailResult.error}`);
+      }
+    }
+
+    // Strategy: Both webhook and direct email
+    if (EMAIL_STRATEGY === "both") {
+      console.log("📧 Using both webhook and direct email...");
+      
+      // Send via direct email first
+      directEmailResult = await sendEmailDirectly(task, compiledTemplate, variables);
+      
+      // Then continue with webhook (don't fail if webhook fails since email was sent)
+      try {
+        const response = await axios.post(webhookUrl, n8nPayload, {
+          timeout: 15000,
+          headers: {
+            "Content-Type": "application/json",
+            "User-Agent": "TaskScheduler/1.0",
+            "X-Task-ID": task._id.toString(),
+            "X-Execution-Type": payload.executionType,
+            "X-Email-From": task.emailConfig.from,
+            "X-Email-To": task.emailConfig.to.join(","),
+          },
+        });
+        webhookResult = { success: true, response: response.data };
+      } catch (webhookError) {
+        webhookResult = { success: false, error: webhookError.message };
+      }
+
+      await Task.findByIdAndUpdate(task._id, {
+        $push: {
+          executionHistory: {
+            executedAt: new Date(),
+            status: directEmailResult.success ? "success" : "partial_success",
+            webhookUrl: webhookUrl,
+            manualTrigger: payload.manualTrigger || false,
+            logs: [
+              ...(directEmailResult.success 
+                ? [`✅ Email sent successfully via direct service (ID: ${directEmailResult.messageId})`]
+                : [`❌ Direct email failed: ${directEmailResult.error}`]
+              ),
+              ...(webhookResult.success 
+                ? [`✅ Webhook sent successfully`]
+                : [`❌ Webhook failed: ${webhookResult.error}`]
+              )
+            ],
+            triggeredRules: triggeredRules,
+            emailMessageId: directEmailResult.messageId,
+            webhookResult: webhookResult,
+          },
+        },
+      });
+
+      return { 
+        status: "success", 
+        message: "Task executed with both methods",
+        emailMessageId: directEmailResult.messageId,
+        webhookResult: webhookResult
+      };
+    }
+
+    // Strategy: Webhook only or webhook with fallback (default behavior)
     // Send to n8n webhook
     const response = await axios.post(webhookUrl, n8nPayload, {
       timeout: 15000, // Increased timeout for email processing
@@ -451,12 +577,42 @@ async function triggerTaskWebhook(task, payload) {
       webhookError.message
     );
 
-    // ✅ ENHANCED: Store detailed error information
+    // ✅ NEW: Try sending email directly as fallback when webhook fails
+    let emailFallbackResult = null;
+    if (task.emailConfig && task.emailConfig.from && task.emailConfig.to) {
+      console.log("🔄 Attempting to send email directly as fallback...");
+      
+      // Prepare variables for template compilation
+      const now = new Date();
+      const variables = {
+        ...task.variables,
+        executionTime: now.toLocaleString(),
+        taskName: task.description,
+        frequency: task.frequency,
+        nextExecution: getNextExecutionTime(task),
+        taskId: task._id.toString(),
+        executionCount: task.executionHistory?.length || 0,
+        date: now.toISOString().slice(0, 10),
+        time: now.toTimeString().slice(0, 5),
+        day: now.toLocaleDateString(undefined, { weekday: "long" }),
+        datetime: now.toLocaleString(),
+      };
+
+      // Compile template
+      const compiledTemplate = task.template
+        ? compileTemplate(task.template, variables)
+        : task.emailConfig?.message ||
+          `Your scheduled task "${task.description}" has been executed.`;
+
+      emailFallbackResult = await sendEmailDirectly(task, compiledTemplate, variables);
+    }
+
+    // ✅ ENHANCED: Store detailed error information with fallback result
     await Task.findByIdAndUpdate(task._id, {
       $push: {
         executionHistory: {
           executedAt: new Date(),
-          status: "failed",
+          status: emailFallbackResult?.success ? "success_fallback" : "failed",
           error: webhookError.message,
           webhookUrl: webhookUrl,
           manualTrigger: payload.manualTrigger || false,
@@ -473,12 +629,31 @@ async function triggerTaskWebhook(task, payload) {
             message: webhookError.message,
             timestamp: new Date().toISOString(),
           },
-          logs: [`Failed to send to n8n: ${webhookError.message}`],
+          fallbackEmail: emailFallbackResult || null,
+          logs: [
+            `Failed to send to n8n: ${webhookError.message}`,
+            ...(emailFallbackResult?.success 
+              ? [`✅ Email sent successfully via fallback service (ID: ${emailFallbackResult.messageId})`]
+              : emailFallbackResult?.error 
+                ? [`❌ Email fallback also failed: ${emailFallbackResult.error}`]
+                : ["No email fallback attempted - missing email configuration"]
+            )
+          ],
         },
       },
     });
 
-    // Re-throw the error for upstream handling
+    // If email fallback succeeded, return success instead of throwing error
+    if (emailFallbackResult?.success) {
+      console.log("✅ Task completed successfully using email fallback");
+      return { 
+        status: "success_fallback", 
+        message: "Task executed successfully via email fallback",
+        emailMessageId: emailFallbackResult.messageId
+      };
+    }
+
+    // Re-throw the error only if both webhook and email fallback failed
     throw webhookError;
   }
 }
