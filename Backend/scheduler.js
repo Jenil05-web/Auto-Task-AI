@@ -1,6 +1,6 @@
 import axios from "axios";
 import cron from "node-cron";
-import Task from "./models/task.js";
+import Task from "../models/task.js";
 import Handlebars from "handlebars";
 
 // ✅ FIXED: Default webhook URL constant
