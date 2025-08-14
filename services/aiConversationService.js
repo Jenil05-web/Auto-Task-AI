@@ -11,25 +11,45 @@ import ConversationLog from "../models/ConversationLog.js"; // Change to import 
  * @param {Object} callContext - Info about the call, user, client, callTask, etc.
  */
 async function startConversation(callContext) {
-  // Example: Initialize conversation log
-  const conversationLog = await ConversationLog.create({
-    user: callContext.userId,
-    client: callContext.clientId,
-    callTask: callContext.callTaskId,
-    transcript: [],
-    actions: [],
-    status: "in_progress",
-  });
+  try {
+    // Validate required fields
+    if (!callContext || !callContext.userId || !callContext.clientId) {
+      throw new Error('Missing required call context fields: userId or clientId');
+    }
 
-  // Example: Greet the client
-  await logMessage(
-    "ai",
-    "Hello! This is your automated assistant. How can I help you today?",
-    conversationLog._id
-  );
+    // Example: Initialize conversation log
+    const conversationLog = await ConversationLog.create({
+      user: callContext.userId,
+      client: callContext.clientId,
+      callTask: callContext.callTaskId,
+      transcript: [],
+      actions: [],
+      status: "in_progress",
+    });
 
-  // Main loop: Listen for client input, process, respond, repeat
-  // (This would be event-driven in a real-time call system)
+    // Example: Greet the client
+    await logMessage(
+      "ai",
+      "Hello! This is your automated assistant. How can I help you today?",
+      conversationLog._id
+    );
+
+    return {
+      success: true,
+      conversationId: conversationLog._id,
+      message: "Conversation started successfully"
+    };
+
+    // Main loop: Listen for client input, process, respond, repeat
+    // (This would be event-driven in a real-time call system)
+  } catch (error) {
+    console.error('Error starting conversation:', error);
+    return {
+      success: false,
+      error: error.message,
+      message: "Failed to start conversation"
+    };
+  }
 }
 
 /**
@@ -64,11 +84,31 @@ async function generateAIResponse(context) {
  * @param {string|ObjectId} conversationLogId
  */
 async function logMessage(sender, message, conversationLogId) {
-  await ConversationLog.findByIdAndUpdate(
-    conversationLogId,
-    { $push: { transcript: { sender, message, timestamp: new Date() } } },
-    { new: true }
-  );
+  try {
+    // Validate inputs
+    if (!sender || !message || !conversationLogId) {
+      throw new Error('Missing required parameters for logMessage');
+    }
+
+    if (!['ai', 'client', 'system'].includes(sender)) {
+      throw new Error('Invalid sender type. Must be ai, client, or system');
+    }
+
+    const result = await ConversationLog.findByIdAndUpdate(
+      conversationLogId,
+      { $push: { transcript: { sender, message, timestamp: new Date() } } },
+      { new: true }
+    );
+
+    if (!result) {
+      throw new Error(`Conversation log not found with ID: ${conversationLogId}`);
+    }
+
+    return { success: true, logId: conversationLogId };
+  } catch (error) {
+    console.error('Error logging message:', error);
+    return { success: false, error: error.message };
+  }
 }
 
 /**
