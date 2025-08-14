@@ -11,6 +11,14 @@ import jwt from "jsonwebtoken";
 import fetch from "node-fetch";
 import { Strategy as GoogleStrategy } from "passport-google-oauth20";
 import { Strategy as SamlStrategy } from "passport-saml";
+import crypto from "crypto";
+
+// Secure password generation for OAuth users
+function generateSecurePassword() {
+  // Generate a cryptographically secure random password
+  // This is only used for OAuth users who don't need to know their password
+  return crypto.randomBytes(32).toString('hex');
+}
 
 // Existing imports
 import taskRoutes from "./routes/taskRoutes.js";
@@ -90,7 +98,7 @@ passport.use(
             name: profile.displayName,
             email: profile.emails[0].value,
             avatar: profile.photos[0]?.value,
-            password: Math.random().toString(36),
+            password: generateSecurePassword(),
             tenantId:
               process.env.DEFAULT_TENANT_ID || "686fcc03d957d085adfdf047",
             role: "member",

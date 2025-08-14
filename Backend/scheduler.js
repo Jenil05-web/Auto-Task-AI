@@ -52,6 +52,100 @@ function compileTemplate(template, variables) {
   }
 }
 
+// ✅ NEW: Safe condition evaluation to prevent code injection
+function evaluateConditionSafely(condition, context) {
+  // Allowlist of safe operators and properties
+  const allowedOperators = ['==', '===', '!=', '!==', '<', '<=', '>', '>=', '&&', '||', '!'];
+  const allowedProperties = [
+    'task.description', 'task.frequency', 'task.progress', 'task.isActive',
+    'execution.timestamp', 'execution.executionType', 'execution.previousExecutions',
+    'date.now', 'date.dayOfWeek', 'date.hour', 'date.minute'
+  ];
+  
+  // Basic validation - ensure condition only contains safe patterns
+  const conditionStr = String(condition).trim();
+  
+  // Block dangerous patterns
+  const dangerousPatterns = [
+    /function\s*\(/i,
+    /eval\s*\(/i,
+    /require\s*\(/i,
+    /import\s+/i,
+    /process\./i,
+    /global\./i,
+    /console\./i,
+    /setTimeout/i,
+    /setInterval/i,
+    /new\s+Function/i,
+    /\.__proto__/i,
+    /\.constructor/i
+  ];
+  
+  for (const pattern of dangerousPatterns) {
+    if (pattern.test(conditionStr)) {
+      throw new Error(`Unsafe condition detected: ${conditionStr}`);
+    }
+  }
+  
+  // Simple expression evaluator for basic comparisons
+  try {
+    // For now, just evaluate simple expressions safely
+    // In production, use a proper expression parser library
+    return evaluateSimpleExpression(conditionStr, context);
+  } catch (error) {
+    console.error('Condition evaluation error:', error);
+    return false;
+  }
+}
+
+// Simple expression evaluator for basic conditions
+function evaluateSimpleExpression(expr, context) {
+  // Replace context variables with actual values
+  let evaluatedExpr = expr;
+  
+  // Replace known safe context paths
+  evaluatedExpr = evaluatedExpr.replace(/task\.isActive/g, context.task.isActive);
+  evaluatedExpr = evaluatedExpr.replace(/task\.progress/g, context.task.progress);
+  evaluatedExpr = evaluatedExpr.replace(/date\.hour/g, context.date.hour);
+  evaluatedExpr = evaluatedExpr.replace(/date\.dayOfWeek/g, context.date.dayOfWeek);
+  evaluatedExpr = evaluatedExpr.replace(/execution\.previousExecutions/g, context.execution.previousExecutions);
+  
+  // Simple boolean evaluation for common patterns
+  if (evaluatedExpr === 'true') return true;
+  if (evaluatedExpr === 'false') return false;
+  
+  // Basic numeric comparisons
+  const numericPattern = /^(\d+)\s*(==|===|!=|!==|<|<=|>|>=)\s*(\d+)$/;
+  const match = evaluatedExpr.match(numericPattern);
+  if (match) {
+    const [, left, operator, right] = match;
+    const leftVal = parseInt(left);
+    const rightVal = parseInt(right);
+    
+    switch (operator) {
+      case '==':
+      case '===':
+        return leftVal === rightVal;
+      case '!=':
+      case '!==':
+        return leftVal !== rightVal;
+      case '<':
+        return leftVal < rightVal;
+      case '<=':
+        return leftVal <= rightVal;
+      case '>':
+        return leftVal > rightVal;
+      case '>=':
+        return leftVal >= rightVal;
+      default:
+        return false;
+    }
+  }
+  
+  // Default to false for unrecognized patterns
+  return false;
+}
+
 // ✅ NEW: Evaluate conditional rules
 function evaluateConditionalRules(task, executionContext) {
   const triggeredRules = [];
@@ -83,12 +177,8 @@ function evaluateConditionalRules(task, executionContext) {
   // Evaluate each rule
   task.conditionalRules.forEach((rule, index) => {
     try {
-      // Simple condition evaluation - in production, use a safer evaluation method
-      // like a dedicated rules engine or Function constructor with limited scope
-      const conditionResult = new Function(
-        "context",
-        `with(context) { return ${rule.condition}; }`
-      )(context);
+      // Safe condition evaluation using allowlisted operators and properties
+      const conditionResult = evaluateConditionSafely(rule.condition, context);
 
       if (conditionResult) {
         triggeredRules.push(index);
