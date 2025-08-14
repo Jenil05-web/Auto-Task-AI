@@ -1,43 +1,7 @@
-import axios from "axios";
 import cron from "node-cron";
 import Task from "../models/task.js";
 import Handlebars from "handlebars";
 import { sendEmail } from "./services/emailService.js";
-
-// ✅ FIXED: Default webhook URL constant
-const DEFAULT_WEBHOOK_URL =
-  "https://jenil005.app.n8n.cloud/webhook/execute-task";
-
-// ✅ NEW: Email sending strategy configuration
-const EMAIL_STRATEGY = process.env.EMAIL_STRATEGY || "webhook_with_fallback"; // Options: "webhook_only", "direct_only", "webhook_with_fallback", "both"
-
-// ✅ NEW: Direct email sending function as fallback
-async function sendEmailDirectly(task, compiledTemplate, variables) {
-  try {
-    if (!task.emailConfig || !task.emailConfig.from || !task.emailConfig.to) {
-      throw new Error("Invalid email configuration");
-    }
-
-    console.log("📧 Sending email directly using email service...");
-    
-    const emailResult = await sendEmail({
-      to: Array.isArray(task.emailConfig.to) ? task.emailConfig.to.join(", ") : task.emailConfig.to,
-      subject: task.emailConfig.subject || `Task Notification: ${task.description}`,
-      text: compiledTemplate,
-      html: task.emailConfig.htmlMessage || compiledTemplate
-    });
-
-    if (emailResult.success) {
-      console.log("✅ Email sent successfully via direct service");
-      return { success: true, messageId: emailResult.messageId };
-    } else {
-      throw new Error(emailResult.error);
-    }
-  } catch (error) {
-    console.error("❌ Failed to send email directly:", error.message);
-    return { success: false, error: error.message };
-  }
-}
 
 // ✅ NEW: Helper to compile template with variables
 function compileTemplate(template, variables) {
@@ -229,54 +193,30 @@ function evaluateConditionalRules(task, executionContext) {
   return { triggeredRules, shouldProceed };
 }
 
-// ✅ ENHANCED: Helper to trigger webhook with complete email configuration for n8n
-async function triggerTaskWebhook(task, payload) {
+// ✅ NEW: Direct email task execution function (replaces triggerTaskWebhook)
+async function executeEmailTask(task, payload) {
   try {
-    // ✅ FIXED: Ensure webhook URL is always available with fallback
-    const webhookUrl = task.webhookUrl || DEFAULT_WEBHOOK_URL;
+    console.log(`📧 Executing email task: ${task.description}`);
 
-    console.log(`🔄 Triggering webhook for task: ${task.description}`);
-    console.log(`📡 Webhook URL: ${webhookUrl}`);
-
-    // Prepare execution context for template and rules
-    const executionContext = {
-      timestamp: new Date(),
-      executionType: payload.executionType || "scheduled",
-      previousExecutions: task.executionHistory?.length || 0,
-    };
-
-    // ✅ NEW: Evaluate conditional rules
-    const { triggeredRules, shouldProceed } = evaluateConditionalRules(
-      task,
-      executionContext
-    );
-
-    if (!shouldProceed) {
-      console.log(
-        `⏭️ Skipping task execution due to conditional rules: ${task.description}`
-      );
-
-      // Log the skipped execution
-      await Task.findByIdAndUpdate(task._id, {
-        $push: {
-          executionHistory: {
-            executedAt: new Date(),
-            status: "skipped",
-            webhookUrl: webhookUrl,
-            manualTrigger: payload.manualTrigger || false,
-            logs: ["Execution skipped due to conditional rules"],
-            triggeredRules: triggeredRules,
-          },
-        },
-      });
-
-      return {
-        status: "skipped",
-        message: "Execution skipped due to conditional rules",
-      };
+    // Validate email configuration
+    if (!task.emailConfig || !task.emailConfig.from || !task.emailConfig.to) {
+      throw new Error("Invalid email configuration: missing from or to addresses");
     }
 
-    // ✅ NEW: Prepare variables for template
+    // Validate email format
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    if (!emailRegex.test(task.emailConfig.from)) {
+      throw new Error(`Invalid 'from' email format: ${task.emailConfig.from}`);
+    }
+
+    const toEmails = Array.isArray(task.emailConfig.to) ? task.emailConfig.to : [task.emailConfig.to];
+    for (const email of toEmails) {
+      if (!emailRegex.test(email)) {
+        throw new Error(`Invalid 'to' email format: ${email}`);
+      }
+    }
+
+    // Prepare variables for template compilation
     const now = new Date();
     const variables = {
       ...task.variables,
@@ -286,379 +226,94 @@ async function triggerTaskWebhook(task, payload) {
       nextExecution: getNextExecutionTime(task),
       taskId: task._id.toString(),
       executionCount: task.executionHistory?.length || 0,
-      // --- Dynamic variables for daily automation ---
       date: now.toISOString().slice(0, 10), // YYYY-MM-DD
       time: now.toTimeString().slice(0, 5), // HH:MM
       day: now.toLocaleDateString(undefined, { weekday: "long" }), // Monday
       datetime: now.toLocaleString(), // Full date and time
     };
 
-    // ✅ NEW: Compile template with variables
+    // Compile template with variables
     const compiledTemplate = task.template
       ? compileTemplate(task.template, variables)
       : task.emailConfig?.message ||
         `Your scheduled task "${task.description}" has been executed.`;
 
-    // ✅ ENHANCED: Log email configuration details
-    if (task.emailConfig) {
-      console.log(`📧 From: ${task.emailConfig.from}`);
-      console.log(`📧 To: ${task.emailConfig.to.join(", ")}`);
-      console.log(`📧 Subject: ${task.emailConfig.subject}`);
-      console.log(`📧 Using template: ${task.template ? "Yes" : "No"}`);
-      console.log(
-        `📧 Message Length: ${compiledTemplate?.length || 0} characters`
-      );
-    }
+    console.log(`📧 Email Details:`);
+    console.log(`   From: ${task.emailConfig.from}`);
+    console.log(`   To: ${toEmails.join(", ")}`);
+    console.log(`   Subject: ${task.emailConfig.subject || `Task Notification: ${task.description}`}`);
+    console.log(`   Template Used: ${task.template ? "Yes" : "No"}`);
+    console.log(`   Message Length: ${compiledTemplate?.length || 0} characters`);
 
-    // ✅ ENHANCED: Create comprehensive payload for n8n with all email details
-    const n8nPayload = {
-      // Task information
-      taskId: task._id,
-      taskDescription: task.description,
-      frequency: task.frequency,
-      executionType: payload.executionType,
-      timestamp: payload.timestamp,
-
-      // ✅ ENHANCED: Complete email configuration for n8n
-      email: {
-        // Sender configuration
-        from: task.emailConfig?.from || null,
-        fromName:
-          task.emailConfig?.fromName ||
-          task.emailConfig?.from?.split("@")[0] ||
-          "Task Scheduler",
-
-        // Recipients configuration
-        to: task.emailConfig?.to || [],
-        toString: Array.isArray(task.emailConfig?.to)
-          ? task.emailConfig.to.join(", ")
-          : task.emailConfig?.to || "",
-        cc: task.emailConfig?.cc || [],
-        bcc: task.emailConfig?.bcc || [],
-
-        // Email content - FLAT STRUCTURE FOR N8N
-        subject:
-          task.emailConfig?.subject || `Task Notification: ${task.description}`,
-        body: compiledTemplate, // Use compiled template
-        message: compiledTemplate, // Use compiled template
-        htmlMessage: task.emailConfig?.htmlMessage || compiledTemplate, // Use compiled template for HTML too
-        text: compiledTemplate, // Plain text version
-
-        // Email settings
-        priority: task.emailConfig?.priority || "normal",
-        attachments: task.emailConfig?.attachments || [],
-
-        // Template variables that n8n can use
-        variables: variables,
-      },
-
-      // ✅ FLAT EMAIL FIELDS FOR N8N COMPATIBILITY
-      from: task.emailConfig?.from || null,
-      to: Array.isArray(task.emailConfig?.to)
-        ? task.emailConfig.to.join(", ")
-        : task.emailConfig?.to || "",
-      toArray: task.emailConfig?.to || [],
-      subject:
-        task.emailConfig?.subject || `Task Notification: ${task.description}`,
-      body: compiledTemplate,
-      message: compiledTemplate,
+    // Send email directly
+    const emailResult = await sendEmail({
+      to: toEmails.join(", "),
+      subject: task.emailConfig.subject || `Task Notification: ${task.description}`,
       text: compiledTemplate,
+      html: task.emailConfig.htmlMessage || compiledTemplate
+    });
 
-      // ✅ ENHANCED: Additional context for n8n workflow
-      context: {
-        webhookUrl: webhookUrl,
-        executionId: `${task._id}-${Date.now()}`,
-        timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
-        serverTime: new Date().toISOString(),
+    if (emailResult.success) {
+      console.log(`✅ Email sent successfully for task: ${task.description}`);
+      console.log(`📧 Message ID: ${emailResult.messageId}`);
 
-        // Task scheduling info
-        scheduling: {
-          frequency: task.frequency,
-          time: task.time,
-          weeklyDay: task.weeklyDay,
-          selectedDays: task.selectedDays,
-          datetime: task.datetime,
-        },
-
-        // ✅ NEW: Add triggered rules information
-        conditionalRules: {
-          triggered: triggeredRules,
-          total: task.conditionalRules?.length || 0,
-        },
-      },
-
-      // ✅ ENHANCED: Action instructions for n8n
-      action: {
-        type: "send_email",
-        requiresEmail: true,
-        validateEmail: true,
-        logExecution: true,
-      },
-    };
-
-    // ✅ ENHANCED: Validate email configuration before sending
-    if (
-      !task.emailConfig ||
-      !task.emailConfig.from ||
-      !task.emailConfig.to ||
-      task.emailConfig.to.length === 0
-    ) {
-      throw new Error(
-        "Invalid email configuration: missing from or to addresses"
-      );
-    }
-
-    // Validate email format
-    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-    if (!emailRegex.test(task.emailConfig.from)) {
-      throw new Error(`Invalid 'from' email format: ${task.emailConfig.from}`);
-    }
-
-    for (const email of task.emailConfig.to) {
-      if (!emailRegex.test(email)) {
-        throw new Error(`Invalid 'to' email format: ${email}`);
-      }
-    }
-
-    console.log(`📤 Sending email configuration to n8n:`);
-    console.log(`   From: ${n8nPayload.email.from}`);
-    console.log(`   To: ${n8nPayload.email.to.join(", ")}`);
-    console.log(`   Subject: ${n8nPayload.email.subject}`);
-    console.log(`   Body: ${n8nPayload.email.body?.substring(0, 100)}...`);
-    console.log(`📧 FLAT EMAIL FIELDS:`);
-    console.log(`   From: ${n8nPayload.from}`);
-    console.log(
-      `   To: ${
-        Array.isArray(n8nPayload.to)
-          ? n8nPayload.to.join(", ")
-          : n8nPayload.to || ""
-      }`
-    );
-    console.log(`   Subject: ${n8nPayload.subject}`);
-    console.log(`   Body: ${n8nPayload.body?.substring(0, 100)}...`);
-    console.log(
-      `📋 Full payload structure:`,
-      JSON.stringify(n8nPayload, null, 2)
-    );
-
-    // ✅ NEW: Handle different email strategies
-    console.log(`📧 Email strategy: ${EMAIL_STRATEGY}`);
-    
-    let webhookResult = null;
-    let directEmailResult = null;
-
-    // Strategy: Direct email only
-    if (EMAIL_STRATEGY === "direct_only") {
-      console.log("📧 Using direct email sending only...");
-      directEmailResult = await sendEmailDirectly(task, compiledTemplate, variables);
-      
-      if (directEmailResult.success) {
-        await Task.findByIdAndUpdate(task._id, {
-          $push: {
-            executionHistory: {
-              executedAt: new Date(),
-              status: "success",
-              webhookUrl: "direct_email",
-              manualTrigger: payload.manualTrigger || false,
-              logs: [`✅ Email sent successfully via direct service (ID: ${directEmailResult.messageId})`],
-              triggeredRules: triggeredRules,
-              emailMessageId: directEmailResult.messageId,
-            },
-          },
-        });
-
-        return { 
-          status: "success", 
-          message: "Task executed successfully via direct email",
-          emailMessageId: directEmailResult.messageId
-        };
-      } else {
-        throw new Error(`Direct email failed: ${directEmailResult.error}`);
-      }
-    }
-
-    // Strategy: Both webhook and direct email
-    if (EMAIL_STRATEGY === "both") {
-      console.log("📧 Using both webhook and direct email...");
-      
-      // Send via direct email first
-      directEmailResult = await sendEmailDirectly(task, compiledTemplate, variables);
-      
-      // Then continue with webhook (don't fail if webhook fails since email was sent)
-      try {
-        const response = await axios.post(webhookUrl, n8nPayload, {
-          timeout: 15000,
-          headers: {
-            "Content-Type": "application/json",
-            "User-Agent": "TaskScheduler/1.0",
-            "X-Task-ID": task._id.toString(),
-            "X-Execution-Type": payload.executionType,
-            "X-Email-From": task.emailConfig.from,
-            "X-Email-To": task.emailConfig.to.join(","),
-          },
-        });
-        webhookResult = { success: true, response: response.data };
-      } catch (webhookError) {
-        webhookResult = { success: false, error: webhookError.message };
-      }
-
+      // Log successful execution
       await Task.findByIdAndUpdate(task._id, {
         $push: {
           executionHistory: {
             executedAt: new Date(),
-            status: directEmailResult.success ? "success" : "partial_success",
-            webhookUrl: webhookUrl,
+            status: "success",
+            method: "direct_email",
             manualTrigger: payload.manualTrigger || false,
-            logs: [
-              ...(directEmailResult.success 
-                ? [`✅ Email sent successfully via direct service (ID: ${directEmailResult.messageId})`]
-                : [`❌ Direct email failed: ${directEmailResult.error}`]
-              ),
-              ...(webhookResult.success 
-                ? [`✅ Webhook sent successfully`]
-                : [`❌ Webhook failed: ${webhookResult.error}`]
-              )
-            ],
-            triggeredRules: triggeredRules,
-            emailMessageId: directEmailResult.messageId,
-            webhookResult: webhookResult,
+            logs: [`✅ Email sent successfully (ID: ${emailResult.messageId})`],
+            emailMessageId: emailResult.messageId,
+            emailDetails: {
+              from: task.emailConfig.from,
+              to: toEmails,
+              subject: task.emailConfig.subject || `Task Notification: ${task.description}`,
+              compiledMessage: compiledTemplate.substring(0, 200) + "..." // Store first 200 chars
+            }
           },
         },
       });
 
       return { 
         status: "success", 
-        message: "Task executed with both methods",
-        emailMessageId: directEmailResult.messageId,
-        webhookResult: webhookResult
+        message: "Email sent successfully",
+        emailMessageId: emailResult.messageId
       };
+    } else {
+      throw new Error(emailResult.error);
     }
+  } catch (error) {
+    console.error(`❌ Failed to execute email task "${task.description}":`, error.message);
 
-    // Strategy: Webhook only or webhook with fallback (default behavior)
-    // Send to n8n webhook
-    const response = await axios.post(webhookUrl, n8nPayload, {
-      timeout: 15000, // Increased timeout for email processing
-      headers: {
-        "Content-Type": "application/json",
-        "User-Agent": "TaskScheduler/1.0",
-        "X-Task-ID": task._id.toString(),
-        "X-Execution-Type": payload.executionType,
-        "X-Email-From": task.emailConfig.from,
-        "X-Email-To": task.emailConfig.to.join(","),
-      },
-    });
-
-    console.log(`✅ Task successfully sent to n8n: ${task.description}`);
-    console.log(
-      `📬 Email will be sent from ${
-        task.emailConfig.from
-      } to ${task.emailConfig.to.join(", ")}`
-    );
-
-    // After successful execution, log triggered rules
+    // Log failed execution
     await Task.findByIdAndUpdate(task._id, {
       $push: {
         executionHistory: {
           executedAt: new Date(),
-          status: "success",
-          webhookUrl: webhookUrl,
+          status: "failed",
+          method: "direct_email",
+          error: error.message,
           manualTrigger: payload.manualTrigger || false,
-          logs: ["Execution completed successfully"],
-          triggeredRules: triggeredRules,
-        },
-      },
-    });
-
-    return { status: "success", message: "Task executed successfully" };
-  } catch (webhookError) {
-    const webhookUrl = task.webhookUrl || DEFAULT_WEBHOOK_URL;
-    console.error(
-      `❌ Failed to trigger webhook for task "${task.description}" at ${webhookUrl}:`,
-      webhookError.message
-    );
-
-    // ✅ NEW: Try sending email directly as fallback when webhook fails
-    let emailFallbackResult = null;
-    if (task.emailConfig && task.emailConfig.from && task.emailConfig.to) {
-      console.log("🔄 Attempting to send email directly as fallback...");
-      
-      // Prepare variables for template compilation
-      const now = new Date();
-      const variables = {
-        ...task.variables,
-        executionTime: now.toLocaleString(),
-        taskName: task.description,
-        frequency: task.frequency,
-        nextExecution: getNextExecutionTime(task),
-        taskId: task._id.toString(),
-        executionCount: task.executionHistory?.length || 0,
-        date: now.toISOString().slice(0, 10),
-        time: now.toTimeString().slice(0, 5),
-        day: now.toLocaleDateString(undefined, { weekday: "long" }),
-        datetime: now.toLocaleString(),
-      };
-
-      // Compile template
-      const compiledTemplate = task.template
-        ? compileTemplate(task.template, variables)
-        : task.emailConfig?.message ||
-          `Your scheduled task "${task.description}" has been executed.`;
-
-      emailFallbackResult = await sendEmailDirectly(task, compiledTemplate, variables);
-    }
-
-    // ✅ ENHANCED: Store detailed error information with fallback result
-    await Task.findByIdAndUpdate(task._id, {
-      $push: {
-        executionHistory: {
-          executedAt: new Date(),
-          status: emailFallbackResult?.success ? "success_fallback" : "failed",
-          error: webhookError.message,
-          webhookUrl: webhookUrl,
-          manualTrigger: payload.manualTrigger || false,
+          logs: [`❌ Email sending failed: ${error.message}`],
           emailConfig: task.emailConfig
             ? {
                 from: task.emailConfig.from,
                 to: task.emailConfig.to,
                 subject: task.emailConfig.subject,
-                message: task.emailConfig.message,
               }
             : null,
-          errorDetails: {
-            type: webhookError.code || "UNKNOWN_ERROR",
-            message: webhookError.message,
-            timestamp: new Date().toISOString(),
-          },
-          fallbackEmail: emailFallbackResult || null,
-          logs: [
-            `Failed to send to n8n: ${webhookError.message}`,
-            ...(emailFallbackResult?.success 
-              ? [`✅ Email sent successfully via fallback service (ID: ${emailFallbackResult.messageId})`]
-              : emailFallbackResult?.error 
-                ? [`❌ Email fallback also failed: ${emailFallbackResult.error}`]
-                : ["No email fallback attempted - missing email configuration"]
-            )
-          ],
         },
       },
     });
 
-    // If email fallback succeeded, return success instead of throwing error
-    if (emailFallbackResult?.success) {
-      console.log("✅ Task completed successfully using email fallback");
-      return { 
-        status: "success_fallback", 
-        message: "Task executed successfully via email fallback",
-        emailMessageId: emailFallbackResult.messageId
-      };
-    }
-
-    // Re-throw the error only if both webhook and email fallback failed
-    throw webhookError;
+    throw error;
   }
 }
 
-// ✅ ENHANCED: Helper function to calculate next execution time
+// ✅ ENHANCED: Helper to calculate next execution time
 function getNextExecutionTime(task) {
   const now = new Date();
 
@@ -865,7 +520,7 @@ const job = cron.schedule("* * * * *", async () => {
         try {
           logTaskExecution(task, "daily");
           await ensureTaskConfiguration(task);
-          await triggerTaskWebhook(task, {
+          await executeEmailTask(task, {
             ...task.toObject(),
             timestamp: now,
             executionType: "daily",
@@ -897,7 +552,7 @@ const job = cron.schedule("* * * * *", async () => {
         try {
           logTaskExecution(task, "weekly", { weekDay });
           await ensureTaskConfiguration(task);
-          await triggerTaskWebhook(task, {
+          await executeEmailTask(task, {
             ...task.toObject(),
             timestamp: now,
             executionType: "weekly",
@@ -931,7 +586,7 @@ const job = cron.schedule("* * * * *", async () => {
         try {
           logTaskExecution(task, "selected days", { weekDay });
           await ensureTaskConfiguration(task);
-          await triggerTaskWebhook(task, {
+          await executeEmailTask(task, {
             ...task.toObject(),
             timestamp: now,
             executionType: "selected",
@@ -984,7 +639,7 @@ const job = cron.schedule("* * * * *", async () => {
             scheduledTime: taskDateTime.toLocaleString(),
           });
           await ensureTaskConfiguration(task);
-          await triggerTaskWebhook(task, {
+          await executeEmailTask(task, {
             ...task.toObject(),
             timestamp: now,
             executionType: "one-time",
@@ -1088,11 +743,8 @@ process.on("SIGTERM", () => {
 
 // Start message and fix existing tasks
 console.log("🚀 Scheduler started and running!");
-console.log("⏰ Current time:", new Date().toLocaleString());
-console.log("🔗 Default webhook URL:", DEFAULT_WEBHOOK_URL);
-console.log(
-  "📧 Email configuration will be sent to N8N for dynamic processing"
-);
+console.log(`⏰ Current time: ${new Date().toLocaleString()}`);
+console.log("📧 Direct email automation enabled - emails will be sent from this application");
 
 // Fix existing tasks on startup
 fixExistingTasks();
