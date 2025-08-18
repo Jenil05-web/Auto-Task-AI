@@ -117,4 +117,9 @@ export async function verifyEmailService() {
   }
 }
 
-export default { sendEmail, sendOTP, verifyEmailService };
+// Default export for ES modules
+const emailService = { sendEmail, sendOTP, verifyEmailService };
+export default emailService;
+
+// Also export individual functions for named imports
+export { sendEmail, sendOTP, verifyEmailService };
