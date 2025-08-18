@@ -76,4 +76,40 @@ export async function verifyEmailService() {
   }
 }
 
-export default { sendEmail, verifyEmailService };
+// Convenience helper to send simple OTP emails
+// Supports both positional and object-style arguments for broader compatibility
+export async function sendOTP(toOrOptions, maybeOtp, maybeSubject) {
+  try {
+    let to;
+    let otp;
+    let subject;
+
+    if (typeof toOrOptions === 'object' && toOrOptions !== null) {
+      ({ to, otp, subject } = toOrOptions);
+    } else {
+      to = toOrOptions;
+      otp = maybeOtp;
+      subject = maybeSubject;
+    }
+
+    if (!to || !otp) {
+      return { success: false, error: 'Missing required parameters: to, otp' };
+    }
+
+    const finalSubject = subject || `Your verification code: ${otp}`;
+    const text = `Your verification code is ${otp}. It expires in 10 minutes.`;
+    const html = `
+      <div style="font-family: Arial, sans-serif; line-height: 1.6;">
+        <p>Your verification code is:</p>
+        <div style="font-size: 24px; font-weight: bold; letter-spacing: 2px;">${otp}</div>
+        <p style="color:#555;">This code expires in 10 minutes. If you did not request it, you can ignore this email.</p>
+      </div>
+    `;
+
+    return await sendEmail({ to, subject: finalSubject, text, html });
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+}
+
+export default { sendEmail, verifyEmailService, sendOTP };
